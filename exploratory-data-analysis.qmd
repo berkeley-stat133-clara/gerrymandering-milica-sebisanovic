@@ -3,26 +3,92 @@ title: Exploratory Data Analysis
 format: typst
 ---
 
+```{r}
+library(tidyverse)
+precinct_congress<- read.csv("data/datag24_sov_by_g24_svprec.csv")
+```
+
+
 ### Question 1
 
-Put your question here.
+How many congressional districts featured two candidates from the same party?
 
 ### Answer 1
+```{r}
+cand_cols<- grep("^CNG", names(precinct_cong), value = TRUE)
 
-Put your answer here.
+# Candidate counts for  per district belonging to each party 
+district_party_counts <- precinct_cong |>
+  summarise(across(all_of(candidate_cols), sum, na.rm = TRUE)) |>
+  pivot_longer(cols = everything(), names_to = "candidate", values_to = "votes") |>
+  mutate(
+    party = case_when(
+      str_detect(candidate, "DEM") ~ "Democrat",
+      str_detect(candidate, "REP") ~ "Republican",
+      TRUE ~ "Other"
+    ),
+    district = str_extract(candidate, "\\d+")
+  ) |>
+  group_by(district, party) |>
+  summarise(num_candidates = n(), .groups = "drop") |>
+  filter(num_candidates > 1)
+
+district_party_counts
+```
+
+Within the old congressional districts of 2024, only a small number of districts featured two candidates from the same party. This only usually happens in party primaries where there are multiple candidates running to represent their party in the November elections. 
 
 ### Question 2
 
-Put your question here.
+Which district had the closes race in 2024?
 
 ### Answer 2
 
-Put your answer here.
+```{r}
+# Calc total Democratic and Republican votes per district
+vote_cols <- grep("^CNG", names(precinct_cong), value = TRUE)
 
+district_summary <- precinct_cong |>
+  group_by(CDDIST) |>
+  summarise(across(all_of(vote_cols), sum, na.rm = TRUE)) |>
+  mutate(
+    DEM_TOTAL = rowSums(select(., matches("DEM")), na.rm = TRUE),
+    REP_TOTAL = rowSums(select(., matches("REP")), na.rm = TRUE),
+    TOTAL_VOTES = DEM_TOTAL + REP_TOTAL,
+    DEM_SHARE = DEM_TOTAL / TOTAL_VOTES,
+    MARGIN = abs(DEM_SHARE - 0.5)
+  ) |>
+  arrange(MARGIN)
+
+head(district_summary, 1)
+
+```
+
+The closest margin was in district 13 where the demcratic candiate beat the republican candidate by barely 0.1% 
 ### Question 3
 
-Put your question here.
-
+Do our new computed district level totals match the official 2024 district level results?
 ### Answer 3
+```{r}
+# district-level results
+district_results <- readxl::read_excel("data/g24-results-by-district.xlsx")
 
-Put your answer here.
+computed_totals <- precinct_cong |>
+  group_by(CDDIST) |>
+  summarise(TOTAL_VOTES = sum(TOTVOTE, na.rm = TRUE))
+
+# join the actual results with our cleaned ones and comp
+comparison <- computed_totals |>
+  left_join(district_results, by = c("CDDIST" = "District")) |>
+  mutate(diff = TOTAL_VOTES - Official_Total)
+
+summary(abs(comparison$diff))
+
+```
+
+The precinct level data more or less mateched the official results from the districts, even if there was a difference it most likely was a result of somethong like mail in ballots counted late or ballots form citizen living abroad whoch usually get counted laterespecially if the race is not close/competitive. 
+
+
+
+#
+

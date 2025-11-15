@@ -2,4 +2,148 @@
 title: Data Cleaning
 format: typst
 ---
+# Data Cleaning 
+```{r}
+library(tidyverse)
+library(lubridate)
+library(readr)
+
+
+raw_path <- "data/datag24_sov_by_g24_svprec.csv"
+
+
+
+
+
+
+# check for empty or NA cells in each column 
+summary(select(precinct_clean, TOTVOTE, DEMVOTE, REPVOTE))
+
+# Create a unique precinct ID to specify city id but also state becasue numbers repeat 
+precinct_clean <- precinct_clean %>%
+  mutate(PREC_ID = paste0(FIPS, "_", SVPREC))
+
+#Double check this by verifying unique IDs
+dup_ids <- precinct_clean %>%
+  count(PREC_ID) %>%
+  filter(n > 1)
+if (nrow(dup_ids) > 0) message("Duplicates exist")
+
+#  Keep only congressional contest columns as those are the ones where districts and how theyre drawn out matters
+cong_cols <- c("PREC_ID", "COUNTY", "CDDIST",
+               grep("^CNG", names(precinct_clean), value = TRUE))
+precinct_cong <- precinct_clean %>% select(all_of(cong_cols))
+
+# Save both cleaned versions
+write_csv(precinct_clean, "data/g24_sov_svprec_cleaned.csv")
+write_csv(precinct_cong, "data/g24_sov_svprec_congressional.csv")
+
+
+
+```
+
+#Project Part 5
+
+```{r}
+library(sf)
+vote_col_pattern <- "^CNG"
+target_crs <- 3310
+
+
+
+
+#approach A
+
+
+sr_votes_csv <- "state_g24_sov_data_by_g24_srprec.csv"
+sr_shp_dir   <- "data/srprec_state_g24_v01_shp/srprec_state_g24_v01_shp.shp"        # directory containing sr precinct shapefile
+ab604_shp_dir<- "data/AB604/AB604.shp" # directory containing AB604 shapefile
+
+# 1. Read SR votes table (tabular)
+sr_votes <- read_csv(sr_votes_csv, show_col_types = FALSE)
+
+# ID candidate level vote columns 
+vote_cols <- grep(vote_col_pattern, names(sr_votes), value = TRUE)
+
+# 2. Read shapefile
+
+sr_shp_file <- list.files(sr_shp_dir, pattern = "\\.shp$", full.names = TRUE)[1]
+sr_shp <- st_read(sr_shp_file, quiet = TRUE)
+
+# 3. Read AB604 congressional shapefile
+ab604_shp_file <- list.files(ab604_shp_dir, pattern = "\\.shp$", full.names = TRUE)[1]
+ab604 <- st_read(ab604_shp_file, quiet = TRUE)
+
+
+sr_shp <- sr_shp %>%
+  st_transform(crs = target_crs) %>%
+  st_set_precision(1) %>%
+  st_make_valid() %>%
+  st_collection_extract("POLYGON")
+
+ab604 <- ab604 %>%
+  st_transform(crs = target_crs) %>%
+  st_set_precision(1) %>%
+  st_make_valid() %>%
+  st_collection_extract("POLYGON")
+
+# 5) Join SR attributes (votes) to geometries.
+# Identify a join key: the SR shapefile often contains SRPREC or SRPREC_KEY column.
+# Find common id column automatically or adapt manually:
+possible_keys <- intersect(tolower(names(sr_shp)), tolower(names(sr_votes)))
+
+
+if ("srprec_key" %in% tolower(names(sr_shp))) {
+  geom_key <- names(sr_shp)[tolower(names(sr_shp)) == "srprec_key"]
+} else {
+ 
+  geom_key <- names(sr_shp)[1]  # replace if wrong
+}
+
+# try to find match
+vote_key <- intersect(names(sr_votes), names(sr_shp))[1]
+
+
+# For reproducibility, do a left join from geometries to the vote table:
+sr_sf <- sr_shp %>%
+  left_join(sr_votes, by = vote_key)
+
+
+# Intersect each SR space with ab604 polygons -> create pieces
+int <- st_intersection(
+  sr_sf |> select(all_of(c(vote_key, vote_cols)), geometry),
+  ab604 |> select(AB604_DIST = whatever_district_id_column, geometry)
+)
+
+
+# 8. find area of each piece and fraction
+int <- int |>
+  mutate(piece_area = st_area(geometry)) |>
+  group_by(!!sym(vote_key)) |>
+  mutate(sr_total_area = sum(piece_area, na.rm = TRUE),
+         area_frac = as.numeric(piece_area / sr_total_area)) |>
+  ungroup()
+
+# 9. multiply each vote column by the area fraction and add to AB604 district
+for (vc in vote_cols) {
+  int[[vc]] <- as.numeric(int[[vc]]) * int$area_frac
+}
+
+ab604_alloc <- int |>
+  st_drop_geometry() |>
+  group_by(AB604_DIST) |>
+  summarise(across(all_of(vote_cols), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+
+
+# print ratio allocated / original
+tibble(variable = vote_cols,
+       original = as.numeric(original_totals),
+       allocated = as.numeric(allocated_totals),
+       ratio = allocated / original) %>% print(n = Inf)
+
+# save results
+write_csv(ab604_alloc, "data/ab604_allocated_area_weighted.csv")
+
+```
 

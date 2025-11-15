@@ -1,0 +1,397 @@
+---
+title: "California Redistricting Dashboard"
+format: 
+  dashboard:
+    theme: cosmo
+    orientation: rows
+    sidebar: true
+knitr:
+  opts_chunk: 
+    warning: false
+    message: false
+---
+
+```{r}
+dashboard.R
+
+
+# 0. Libraries
+
+library(tidyverse)
+library(readr)
+library(lubridate)
+library(sf)
+library(readxl)
+library(ggplot2)
+library(shiny)  
+
+# 1. File paths 
+
+
+raw_svprec_csv            <- "data/datag24_sov_by_g24_svprec.csv"       
+cleaned_all_csv           <- "data/g24_sov_svprec_cleaned.csv"
+cleaned_cong_csv          <- "data/g24_sov_svprec_congressional.csv"
+official_district_xlsx    <- "data/g24-results-by-district.xlsx"
+
+# SR precinct files for Approach A:
+sr_votes_csv              <- "data/state_g24_sov_data_by_g24_srprec.csv"  # TODO: ensure this is correct
+sr_shp_path               <- "data/srprec_state_g24_v01_shp/srprec_state_g24_v01_shp.shp" # TODO
+ab604_shp_path            <- "data/AB604/AB604.shp"  # TODO: AB604 shapefile
+
+# Output of allocation
+ab604_area_weighted_csv   <- "data/ab604_allocated_area_weighted.csv"
+
+
+# 2. Basic data cleaning & save cleaned files
+
+# Read raw SV precinct CSV (the one you referenced)
+prec_raw <- read_csv(raw_svprec_csv, show_col_types = FALSE)
+
+
+
+
+# Create presinct ID
+if (!("FIPS" %in% names(precinct_clean) && "SVPREC" %in% names(precinct_clean))) {
+  warning("FIPS or SVPREC not found in raw file. Please set correct column names for unique id creation.")
+} else {
+  precinct_clean <- precinct_clean %>%
+    mutate(PREC_ID = paste0(FIPS, "_", SVPREC))
+}
+
+
+write_csv(precinct_clean, cleaned_all_csv)
+cat("Wrote cleaned full precinct file to:", cleaned_all_csv, "\n")
+
+# Keep only congressional contest columns (CNG*)
+cong_cols <- grep("^CNG", names(precinct_clean), value = TRUE)
+# required ID columns
+keep_cols <- c("PREC_ID", "COUNTY", "CDDIST", cong_cols)
+keep_cols <- intersect(keep_cols, names(precinct_clean))  # only keep existing
+precinct_cong <- precinct_clean %>% select(all_of(keep_cols))
+
+# Save congressional-only cleaned file
+write_csv(precinct_cong, cleaned_cong_csv)
+cat("Wrote cleaned congressional-only file to:", cleaned_cong_csv, "\n")
+
+
+# 3. Part 3: Exploratory Data Analysis 
+
+
+# Q1: How many districts featured two candidate columns from same party?
+candidate_cols <- grep("^CNG", names(precinct_cong), value = TRUE)
+cand_df <- tibble(candidate_col = candidate_cols) %>%
+  mutate(
+    party = case_when(
+      str_detect(candidate_col, "DEM") ~ "Democrat",
+      str_detect(candidate_col, "REP") ~ "Republican",
+      TRUE ~ "Other"
+    ),
+    district = str_extract(candidate_col, "\\d+")
+  )
+
+district_party_counts <- cand_df %>%
+  group_by(district, party) %>%
+  summarize(num_candidate_cols = n(), .groups = "drop") %>%
+  filter(num_candidate_cols > 1)
+
+cat("Districts with >1 candidate column for same party:\n")
+print(district_party_counts)
+
+# Q2: Which district had the closest race in 2024?
+vote_cols <- grep("^CNG", names(precinct_cong), value = TRUE)
+
+district_summary <- precinct_cong %>%
+  group_by(CDDIST) %>%
+  summarise(across(all_of(vote_cols), sum, na.rm = TRUE), .groups = "drop") %>%
+  mutate(
+    DEM_TOTAL = rowSums(select(., matches("DEM")), na.rm = TRUE),
+    REP_TOTAL = rowSums(select(., matches("REP")), na.rm = TRUE),
+    TOTAL_VOTES = DEM_TOTAL + REP_TOTAL,
+    DEM_SHARE = if_else(TOTAL_VOTES > 0, DEM_TOTAL / TOTAL_VOTES, NA_real_),
+    MARGIN = abs(DEM_SHARE - 0.5)
+  ) %>%
+  arrange(MARGIN)
+
+cat("Closest districts (top 5):\n")
+print(head(district_summary, 5))
+
+# Q3: Do our computed district totals match official counts?
+if (file.exists(official_district_xlsx)) {
+  official_results <- read_excel(official_district_xlsx)
+  # Try to find appropriate columns in official file
+  cat("Official results columns:\n"); print(names(official_results))
+  
+  possible_totals <- names(official_results)[sapply(official_results, is.numeric)]
+  if (length(possible_totals) >= 1) {
+    official_total_col <- possible_totals[1]  
+    n
+    possible_dist_cols <- names(official_results)[sapply(official_results, function(x) any(grepl("\\d+", as.character(x))))]
+    
+ 
+}
+
+
+# 4. Part 4: Mean–Median & Efficiency Gap for 2024 map
+
+# Identify DEM/REP candidate columns
+cng_cols <- vote_cols
+dem_cols <- cng_cols[grepl("DEM", cng_cols)]
+rep_cols <- cng_cols[grepl("REP", cng_cols)]
+
+# Aggregate to district level (2024)
+district_votes <- precinct_cong %>%
+  group_by(CDDIST) %>%
+  summarise(
+    DEM_TOTAL = rowSums(across(all_of(dem_cols)), na.rm = TRUE),
+    REP_TOTAL = rowSums(across(all_of(rep_cols)), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(TP_TOTAL = DEM_TOTAL + REP_TOTAL,
+         DEM_SHARE = if_else(TP_TOTAL > 0, DEM_TOTAL / TP_TOTAL, NA_real_))
+
+# Mean-median 
+mean_share <- mean(district_votes$DEM_SHARE, na.rm = TRUE)
+median_share <- median(district_votes$DEM_SHARE, na.rm = TRUE)
+mean_median_pp <- (mean_share - median_share) * 100
+
+# Efficiency gap
+district_votes <- district_votes %>%
+  mutate(MAJ_THRESH = (TP_TOTAL %/% 2) + 1,
+         W_DEM = if_else(DEM_TOTAL > REP_TOTAL, DEM_TOTAL - MAJ_THRESH, DEM_TOTAL),
+         W_REP = if_else(REP_TOTAL > DEM_TOTAL, REP_TOTAL - MAJ_THRESH, REP_TOTAL))
+
+total_w_dem <- sum(district_votes$W_DEM, na.rm = TRUE)
+total_w_rep <- sum(district_votes$W_REP, na.rm = TRUE)
+total_two_party_votes <- sum(district_votes$TP_TOTAL, na.rm = TRUE)
+
+efficiency_gap <- (total_w_rep - total_w_dem) / total_two_party_votes
+
+seats_dem <- sum(district_votes$DEM_TOTAL > district_votes$REP_TOTAL, na.rm = TRUE)
+seats_rep <- sum(district_votes$REP_TOTAL >= district_votes$DEM_TOTAL, na.rm = TRUE)
+
+cat("2024 Mean–Median (pp):", round(mean_median_pp, 3), "\n")
+cat("2024 Efficiency gap:", round(efficiency_gap, 4), "\n")
+cat("2024 Seats: Dem", seats_dem, " Rep", seats_rep, "\n")
+
+
+# 5. Part 5: Approach A — 
+
+
+# Read SR votes & shapefiles
+if (!file.exists(sr_votes_csv)) stop("SR votes CSV not found; please set sr_votes_csv path at top of script.")
+if (!file.exists(sr_shp_path)) stop("SR shapefile not found; please set sr_shp_path at top of script.")
+if (!file.exists(ab604_shp_path)) stop("AB604 shapefile not found; please set ab604_shp_path at top of script.")
+
+sr_votes <- read_csv(sr_votes_csv, show_col_types = FALSE)
+vote_cols_sr <- grep("^CNG", names(sr_votes), value = TRUE)
+if (length(vote_cols_sr) == 0) {
+  warning("No CNG columns found in SR votes CSV. Adjust pattern if necessary.")
+}
+
+# Read shapefiles
+sr_shp <- st_read(sr_shp_path, quiet = TRUE)
+ab604_shp <- st_read(ab604_shp_path, quiet = TRUE)
+
+# Transform + fix
+target_crs <- 3310
+sr_shp <- sr_shp %>% st_transform(crs = target_crs) %>% st_set_precision(1) %>% st_make_valid() %>% st_collection_extract("POLYGON")
+ab604_shp <- ab604_shp %>% st_transform(crs = target_crs) %>% st_set_precision(1) %>% st_make_valid() %>% st_collection_extract("POLYGON")
+
+
+possible_keys <- intersect(tolower(names(sr_shp)), tolower(names(sr_votes)))
+cat("Possible join keys between sr_shp and sr_votes (lowercased):\n"); print(possible_keys)
+
+# TODO: set these to the actual join key names present in your files
+vote_key <- if ("SRPREC_KEY" %in% names(sr_votes)) "SRPREC_KEY" else intersect(names(sr_votes), names(sr_shp))[1]
+geom_key <- vote_key  # assume same name in shapefile; change if different
+cat("Using vote_key =", vote_key, "and geom_key =", geom_key, "\n")
+
+if (is.na(vote_key) || is.null(vote_key)) stop("Could not determine a join key automatically. Edit vote_key to the correct column name in sr_votes and sr_shp.")
+
+# Left join votes to geometry, align column names if necessary
+# If column names differ in case, try to match ignoring case
+if (!(geom_key %in% names(sr_shp))) {
+  # try lowercase match
+  geom_key <- names(sr_shp)[tolower(names(sr_shp)) == tolower(vote_key)][1]
+}
+sr_sf <- sr_shp %>% left_join(sr_votes, by = setNames(vote_key, geom_key))
+
+# Check successful join
+joined_rows <- nrow(sr_sf)
+cat("SR shapefile rows after join:", joined_rows, "\n")
+if (all(sapply(vote_cols_sr, function(x) x %in% names(sr_sf)) == FALSE)) {
+  warning("Some vote columns not present in joined sr_sf. Check vote_cols_sr and join key.")
+}
+
+# Determine AB604 district id column in ab604_shp
+possible_ab_cols <- c("DISTRICT", "CD", "CDID", "AB604", "AB_DIST", "CD114FP", "CD119FP")
+ab_col <- intersect(possible_ab_cols, names(ab604_shp))[1]
+if (is.null(ab_col)) {
+  # fallback to first non-geometry column
+  ab_col <- names(ab604_shp)[1]
+  warning("Couldn't auto-detect AB604 district column; using ", ab_col, " — edit script if this is incorrect.")
+}
+cat("Using AB604 district column:", ab_col, "\n")
+
+# Perform intersection: split SR polygons by AB604 districts
+# For safety, select only the join key + vote columns + geometry
+select_cols <- intersect(c(geom_key, vote_cols_sr), names(sr_sf))
+if (!(geom_key %in% select_cols)) select_cols <- c(select_cols, geom_key)
+sr_sf_small <- sr_sf %>% select(all_of(select_cols), geometry)
+
+# rename AB604 district column to AB604_DIST for downstream code
+ab604_sel <- ab604_shp %>% select(AB604_DIST = all_of(ab_col), geometry)
+
+# Intersection (this can be slow for whole-state)
+int <- st_intersection(sr_sf_small, ab604_sel)
+
+# If intersection failed or produced 0 rows, warn
+if (nrow(int) == 0) stop("Intersection produced 0 rows; check geometries and join keys.")
+
+# compute piece areas and area fraction relative to the original SR polygon
+int <- int %>%
+  mutate(piece_area = st_area(geometry)) %>%
+  group_by(.data[[geom_key]]) %>%
+  mutate(sr_total_area = sum(piece_area, na.rm = TRUE),
+         area_frac = as.numeric(piece_area / sr_total_area)) %>%
+  ungroup()
+
+# allocate votes by area_frac
+for (vc in vote_cols_sr) {
+  # if column missing in int (join failure), create as 0
+  if (!(vc %in% names(int))) {
+    int[[vc]] <- 0
+  }
+  int[[vc]] <- as.numeric(int[[vc]]) * int$area_frac
+}
+
+# aggregate up to AB604 districts
+ab604_alloc <- int %>%
+  st_drop_geometry() %>%
+  group_by(AB604_DIST) %>%
+  summarise(across(all_of(vote_cols_sr), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+# Save results
+write_csv(ab604_alloc, ab604_area_weighted_csv)
+cat("Saved AB604 area-weighted allocation to:", ab604_area_weighted_csv, "\n")
+
+# Quick totals check
+original_totals <- colSums(sr_votes[vote_cols_sr], na.rm = TRUE)
+allocated_totals <- colSums(ab604_alloc[vote_cols_sr], na.rm = TRUE)
+
+diag_tbl <- tibble(variable = vote_cols_sr,
+                   original = as.numeric(original_totals),
+                   allocated = as.numeric(allocated_totals),
+                   ratio = allocated / original)
+print(diag_tbl)
+
+
+# 6. Part 6: compute metrics on AB604 allocation (re-run metrics)
+
+# Identify dem/rep columns in ab604_alloc (fall back to searching for DEM/REP)
+ab_dem_cols <- grep("DEM", names(ab604_alloc), value = TRUE)
+ab_rep_cols <- grep("REP", names(ab604_alloc), value = TRUE)
+
+if (length(ab_dem_cols) == 0 || length(ab_rep_cols) == 0) {
+  
+  ab_dem_cols <- vote_cols_sr[grepl("DEM", vote_cols_sr)]
+  ab_rep_cols <- vote_cols_sr[grepl("REP", vote_cols_sr)]
+}
+
+ab604_results <- ab604_alloc %>%
+  mutate(votes_dem = rowSums(across(all_of(ab_dem_cols)), na.rm = TRUE),
+         votes_rep = rowSums(across(all_of(ab_rep_cols)), na.rm = TRUE),
+         district = as.character(AB604_DIST)) %>%
+  select(district, votes_dem, votes_rep)
+
+# mean-median & efficiency gap for AB604
+ab_mean_share <- mean(ab604_results$votes_dem / (ab604_results$votes_dem + ab604_results$votes_rep), na.rm = TRUE)
+ab_median_share <- median(ab604_results$votes_dem / (ab604_results$votes_dem + ab604_results$votes_rep), na.rm = TRUE)
+mean_median_ab604_pp <- (ab_mean_share - ab_median_share) * 100
+
+w_ab <- wasted_votes(ab604_results$votes_dem, ab604_results$votes_rep)
+efficiency_gap_ab604 <- sum(w_ab$wastedB - w_ab$wastedA) / sum(w_ab$total)
+seats_dem_ab604 <- sum(ab604_results$votes_dem > ab604_results$votes_rep, na.rm = TRUE)
+seats_rep_ab604 <- sum(ab604_results$votes_rep >= ab604_results$votes_dem, na.rm = TRUE)
+
+cat("AB604 Mean–Median (pp):", round(mean_median_ab604_pp, 3), "\n")
+cat("AB604 Efficiency gap:", round(efficiency_gap_ab604, 4), "\n")
+cat("AB604 Seats: Dem", seats_dem_ab604, " Rep", seats_rep_ab604, "\n")
+
+
+# 7. Part 7: Dashboard visuals 
+
+
+# 7.1 Create summary table
+comparison_table <- tibble(
+  Map = c("2024 Districts", "AB604 (area-weighted)"),
+  Dem_Seats = c(seats_dem, seats_dem_ab604),
+  Rep_Seats = c(seats_rep, seats_rep_ab604),
+  Mean_Median_pp = c(mean_median_pp, mean_median_ab604_pp),
+  Efficiency_Gap = c(efficiency_gap, efficiency_gap_ab604)
+)
+print(comparison_table)
+
+# 7.2 Load 2024 census CD shapefile for mapping (user must provide)
+# TODO: change to your actual shapefile path for 2024 CDs (Census)
+census_cd_shp <- "data/shapefiles/census_2024_cd/cb_2024_us_cd119_2024.shp"
+if (file.exists(census_cd_shp)) {
+  cd2024 <- st_read(census_cd_shp, quiet = TRUE) %>% st_transform(3310)
+  # attempt to find district id column and join district_2024 results
+  possible_cd_cols <- c("CD119FP", "CD116FP", "CD114FP", "DISTRICT", "GEOID", "CD115FP")
+  cd_col <- intersect(possible_cd_cols, names(cd2024))[1]
+  if (!is.null(cd_col)) {
+    cd2024 <- cd2024 %>% mutate(cd_id = as.integer(as.character(.data[[cd_col]])))
+    district_viz <- district_votes %>% mutate(cd_id = as.integer(CDDIST))
+    cd2024_voted <- cd2024 %>% left_join(district_viz %>% select(cd_id, DEM_TOTAL, REP_TOTAL), by = "cd_id") %>%
+      mutate(WINNER = if_else(DEM_TOTAL > REP_TOTAL, "Dem", "Rep"))
+  } else {
+    cd2024_voted <- cd2024
+    warning("Couldn't find an obvious district id column in census CD shapefile; map will be generic.")
+  }
+} else {
+  cd2024_voted <- NULL
+  warning("Census 2024 CD shapefile not found; skip 2024 map plotting.")
+}
+
+# 7.3 AB604 map for plotting (ab604_shp already read earlier)
+# join votes by AB604_DIST (ensure types match)
+if (exists("ab604_shp") && nrow(ab604_shp) > 0) {
+  ab604_viz <- ab604_shp %>%
+    mutate(ab_id = as.character(.data[[ab_col]])) %>%
+    left_join(ab604_results %>% mutate(district = as.character(district)) %>% rename(ab_id = district), by = "ab_id") %>%
+    mutate(WINNER = if_else(votes_dem > votes_rep, "Dem", "Rep"))
+} else {
+  ab604_viz <- NULL
+  warning("AB604 shapefile not available for plotting.")
+}
+
+# Plot side-by-side if both maps exist
+plots <- list()
+if (!is.null(cd2024_voted)) {
+  p1 <- ggplot(cd2024_voted) +
+    geom_sf(aes(fill = WINNER), color = NA) +
+    scale_fill_manual(values = c("Dem" = "blue", "Rep" = "red"), na.value = "grey") +
+    labs(title = "2024 Congressional districts (Winners)") +
+    theme_minimal()
+  plots <- c(plots, list(p1))
+}
+if (!is.null(ab604_viz)) {
+  p2 <- ggplot(ab604_viz) +
+    geom_sf(aes(fill = WINNER), color = NA) +
+    scale_fill_manual(values = c("Dem" = "blue", "Rep" = "red"), na.value = "grey") +
+    labs(title = "AB-604 districts (area-weighted allocation winners)") +
+    theme_minimal()
+  plots <- c(plots, list(p2))
+}
+
+if (length(plots) == 2) {
+  plot_grid(plots[[1]], plots[[2]], ncol = 2)
+} else if (length(plots) == 1) {
+  print(plots[[1]])
+
+
+
+```
+## Methodology
+The data used came from the 2024 election with a special focus n congressional races as these are the ones that most directly impacted by gerrymandering. When it came to data cleaning I mostly focused on things that would make further working with the data easier for R, this includes standardizing names of columns, filtering for only congressional races, reshaping data, removing 3rd party candidates, and merging shape files. As for the metrics used to estimate gerrymandering to calculate the mean median score I compared each districts Democratic the difference is waster voted between the two partiesshare of the vote to the distributon of vote shares statewide, calculating mean - median, where a positive score would indicate advantage for Republicans and a negative score would indicate advantage for democrats. I also calculated the effiency gap which measured the diffrence in wasted voted between the parties (wasted republican - waster democratic/ total votes).

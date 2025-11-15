@@ -2,6 +2,113 @@
 title: Gerrymandering Metrics
 format: typst
 ---
+##Mean-Median and efficiency gap
+```{r}
+library(tidyverse)
+library(readr)
+
+precinct_cong <- read_csv("data/g24_sov_svprec_congressional.csv")
+
+#Finds congressional candidates, then party affiliation
+cng_cols <- grep("^CNG", names(precinct_cong), value = TRUE)
+dem_cols <- cng_cols[grepl("DEM", cng_cols)]
+rep_cols <- cng_cols[grepl("REP", cng_cols)]
+
+# precinct to district level
+district_votes <- precinct_cong |>
+  group_by(CDDIST) |>
+  summarise(
+    DEM_TOTAL = sum(across(all_of(dem_cols)), na.rm = TRUE),
+    REP_TOTAL = sum(across(all_of(rep_cols)), na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    TP_TOTAL = DEM_TOTAL + REP_TOTAL
+  ) |>
+
+
+#  share of Democratic party votes
+district_votes <- district_votes |>
+  mutate(DEM_SHARE = DEM_TOTAL / TP_TOTAL)
+
+# mean-median
+mean_share <- mean(district_votes$DEM_SHARE)
+median_share <- median(district_votes$DEM_SHARE)
+mean_median_pp <- (mean_share - median_share) * 100
+
+# efficiency gap calculation, compute wasted votes per district using integer majority threshold
+district_votes <- district_votes |>
+  mutate(
+    MAJ_THRESH = (TP_TOTAL %/% 2) + 1,
+    W_DEM = if_else(DEM_TOTAL > REP_TOTAL, DEM_TOTAL - MAJ_THRESH, DEM_TOTAL),
+    W_REP = if_else(REP_TOTAL > DEM_TOTAL, REP_TOTAL - MAJ_THRESH, REP_TOTAL)
+  )
+
+total_w_dem <- sum(district_votes$W_DEM, na.rm = TRUE)
+total_w_rep <- sum(district_votes$W_REP, na.rm = TRUE)
+total_two_party_votes <- sum(district_votes$TP_TOTAL, na.rm = TRUE)
+
+efficiency_gap <- (total_w_rep - total_w_dem) / total_two_party_votes
+
+# Seats by party (aggregate winners)
+seats_dem <- sum(district_votes$DEM_TOTAL > district_votes$REP_TOTAL, na.rm = TRUE)
+seats_rep <- sum(district_votes$REP_TOTAL >= district_votes$DEM_TOTAL, na.rm = TRUE)  # tie -> treat Rep as winner
+
+
+
+```
+
+Metrics re-run 
+```{r}
+# re-running mead median and effiencecy gap on new results
+mean_median_score_ab604 <- ab604_results |>
+  mutate(
+    dem_share = votes_dem / (votes_dem + votes_rep)
+  ) |>
+  summarize(
+    mean_dem = mean(dem_share, na.rm = TRUE),
+    median_dem = median(dem_share, na.rm = TRUE),
+    mean_median_score = mean_dem - median_dem
+  )
+
+mean_median_score_ab604
+
+
+
+# Function that returns wasted votes for a vector of A vs B votes
+wasted_votes <- function(votesA, votesB) {
+  
+  tibble(votesA, votesB) |>
+    rowwise() |>
+    mutate(
+      district_total = votesA + votesB,
+      threshold = floor(district_total / 2) + 1,
+      winner = ifelse(votesA > votesB, "A", "B"),
+      wastedA = ifelse(winner == "A",
+                       votesA - threshold,
+                       votesA),
+      wastedB = ifelse(winner == "B",
+                       votesB - threshold,
+                       votesB)
+    ) |>
+    ungroup()
+}
+
+wasted_ab604 <- wasted_votes(
+  votesA = ab604_results$votes_dem,
+  votesB = ab604_results$votes_rep
+)
+
+efficiency_gap_ab604 <- sum(wasted_ab604$wastedA - wasted_ab604$wastedB) /
+  sum(wasted_ab604$district_total)
+
+efficiency_gap_ab604
+
+
+
+
+```
+
 
 ### 2024 Election Results and the 2024 District Map
 
